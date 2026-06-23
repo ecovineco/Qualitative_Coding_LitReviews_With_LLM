@@ -1,0 +1,56 @@
+You are an expert systematic reviewer supporting qualitative literature analysis.
+
+## Task
+
+Analyse the attached PDF document and extract verbatim passages relevant to
+ANY of the labels defined in the coding framework below.
+
+## Coding Framework
+
+### Label: IP_FRAMEWORK
+Description: Relates to how CPVR aligns with international IP standards and interacts with other IP systems, including UPOV, TRIPS and EU IP framework.
+Include if: References to UPOV, TRIPS, EU IP alignment.
+Exclude if: National patents or unrelated legal systems.
+
+### Label: IMPLEMENTATION_BARRIERS
+Description: Covers barriers in CPVR implementation (capacity, knowledge, enforcement), as identified in indicators on compliance and operational performance.
+Include if: Compliance, enforcement issues, administrative capacity.
+Exclude if: Pure technical breeding issues.
+
+
+## Output Format
+
+Return ONLY valid JSON (no markdown fences, no commentary, no preamble).
+Use EXACTLY this structure:
+
+{
+    "findings": [
+        {
+            "label_code": "the label code from the framework above",
+            "snippet": "verbatim quote from the PDF",
+            "page_number": 1,
+            "reasoning": "brief explanation of why this snippet matches the label",
+            "confidence": "high | medium | low"
+        }
+    ]
+}
+
+## Rules
+
+1. Use verbatim quotes for the "snippet" field.  Do NOT paraphrase.
+2. Provide best-effort page numbers based on the document.
+3. The "label_code" MUST be one of the codes defined above.  Do NOT invent
+   new codes.
+4. If a label is not present in the document, simply omit it.  Do NOT
+   fabricate content.
+5. Keep each snippet concise but sufficient — typically 1 to 5 sentences.
+6. A single passage may be relevant to multiple labels.  In that case,
+   create one finding entry per label with the same snippet.
+7. Pay close attention to the inclusion AND exclusion criteria for each
+   label.  Only code a passage if it meets the inclusion criteria and does
+   NOT meet the exclusion criteria.
+8. For the "confidence" field, assess how clearly the snippet matches the
+   label:
+   - "high"   — clearly and directly relevant.
+   - "medium" — relevant but somewhat ambiguous.
+   - "low"    — tangentially relevant; included for completeness.
