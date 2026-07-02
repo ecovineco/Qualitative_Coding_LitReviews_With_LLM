@@ -158,11 +158,15 @@ path, so verification always re-resolves PDFs from this folder by
 filename.)
 """
 
-VERIFY_OUTPUT: str = "./outputs/verification.xlsx"
-"""Where the snippet-verification results are written.
+VERIFIED_OUTPUT: str = "./outputs/coded_findings_verified.xlsx"
+"""Full audit file: every finding plus its verification verdict.
 
-The file joins back to ``coded_findings.xlsx`` on ``snippet_id`` (and on
-``finding_hash`` for cross-run stability).
+Written alongside ``coded_findings.xlsx`` at the end of every run.
+``coded_findings.xlsx`` is the clean deliverable — it contains only the
+findings whose snippet was located in the source PDF (i.e. every status
+except ``not_found``) and carries no verification columns.  This file
+contains *all* findings, including ``not_found`` ones, each annotated
+with its verification status, score, method and matched page.
 """
 
 VERIFY_FUZZY_THRESHOLD: int = 95

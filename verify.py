@@ -829,26 +829,44 @@ def run_verification_cli(
     pdf_dir: str | Path,
     output_path: str | Path,
 ) -> List[VerificationResult]:
-    """Verify the findings in an Excel file and write the results.
+    """Verify a findings Excel file and write the full audit file.
 
     This is the standalone path; the inline pipeline calls
     :func:`verify_findings` directly on its in-memory findings instead.
+    It reads every row of ``findings_path``, verifies each snippet, and
+    writes ``output_path`` (``coded_findings_verified.xlsx`` by default)
+    containing the original rows extended with the verification columns.
+    The input file is never modified, so this is safe to re-run while
+    tuning thresholds.
 
     Args:
-        findings_path: Path to ``coded_findings.xlsx``.
+        findings_path: Path to a findings Excel file (e.g.
+            ``coded_findings.xlsx``).
         pdf_dir: Directory holding the source PDFs.
-        output_path: Where to write the verification Excel file.
+        output_path: Where to write the verified audit Excel file.
 
     Returns:
         The list of :class:`VerificationResult`.
     """
-    # Imported here to keep the dependency one-directional (export never
-    # imports verify), avoiding any import cycle.
-    from export import save_verification
+    import pandas as pd
 
+    # The verification-specific columns to append (single source of truth
+    # is ``export``; imported lazily to keep the dependency one-directional
+    # — ``export`` never imports ``verify``).
+    from export import _VERIFICATION_EXTRA_COLUMNS
+
+    df = pd.read_excel(str(findings_path), dtype=str).fillna("")
     records = _records_from_excel(findings_path)
     results = verify_findings(records, pdf_dir=pdf_dir)
-    save_verification(results, output_path)
+
+    verdicts = {r.snippet_id: r.to_dict() for r in results}
+    sids = df["snippet_id"] if "snippet_id" in df.columns else [""] * len(df)
+    for col in _VERIFICATION_EXTRA_COLUMNS:
+        df[col] = [verdicts.get(sid, {}).get(col) for sid in sids]
+
+    Path(output_path).parent.mkdir(parents=True, exist_ok=True)
+    df.to_excel(str(output_path), index=False)
+    logger.info("Saved %d verified findings to %s", len(df), output_path)
     return results
 
 
@@ -877,8 +895,11 @@ def main() -> None:
     )
     parser.add_argument(
         "--out",
-        default=config.VERIFY_OUTPUT,
-        help="Where to write verification.xlsx (default: config.VERIFY_OUTPUT).",
+        default=config.VERIFIED_OUTPUT,
+        help=(
+            "Where to write the verified audit file "
+            "(default: config.VERIFIED_OUTPUT, coded_findings_verified.xlsx)."
+        ),
     )
     args = parser.parse_args()
     run_verification_cli(args.findings, args.pdfs, args.out)

@@ -56,7 +56,7 @@ from export import (
     save_errors,
     save_file_mapping,
     save_findings,
-    save_verification,
+    save_verified_findings,
 )
 from labels import (
     Label,
@@ -66,7 +66,12 @@ from labels import (
 )
 from parser import Finding, ParseError, parse_all_results
 from prompt import build_analysis_prompt
-from verify import VERIFIED_STATUSES, summarize, verify_findings
+from verify import (
+    STATUS_NOT_FOUND,
+    VERIFIED_STATUSES,
+    summarize,
+    verify_findings,
+)
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -441,6 +446,7 @@ def run_pipeline(resume: bool = False) -> None:
     metadata_path = os.path.join(config.OUTPUT_DIR, "batch_metadata.json")
     findings_path = os.path.join(config.OUTPUT_DIR, "coded_findings.xlsx")
     errors_path = os.path.join(config.OUTPUT_DIR, "errors.xlsx")
+    verified_path = config.VERIFIED_OUTPUT
     os.makedirs(config.OUTPUT_DIR, exist_ok=True)
 
     # ── Step 1: Load labels & group by category ────────────────────────
@@ -532,19 +538,31 @@ def run_pipeline(resume: bool = False) -> None:
         logger.info("DRY RUN: pipeline stopped before submission.")
         return
 
-    # ── Step 6: Export merged results ──────────────────────────────────
-    logger.info("Step 6: Exporting merged results...")
-    save_findings(all_findings, findings_path)
-    save_errors(all_errors, errors_path)
-
-    # ── Step 7: Verify snippets against their source PDFs ──────────────
-    # Always run: confirms every coded snippet is a real verbatim quote
-    # from its source document.  Needs no API credits.
-    logger.info("Step 7: Verifying snippets against source PDFs...")
+    # ── Step 6: Verify snippets against their source PDFs ──────────────
+    # Always runs; needs no API credits.  Confirms each coded snippet is a
+    # real verbatim quote from its source document.
+    logger.info("Step 6: Verifying snippets against source PDFs...")
     verification = verify_findings(all_findings, pdf_dir=config.PDF_SOURCE_DIR)
-    save_verification(verification, config.VERIFY_OUTPUT)
     verify_counts = summarize(verification)
     verified_total = sum(verify_counts.get(s, 0) for s in VERIFIED_STATUSES)
+
+    # ── Step 7: Export results ─────────────────────────────────────────
+    # coded_findings.xlsx is the clean deliverable: every finding except
+    # those whose snippet could not be located (``not_found``), with no
+    # verification columns.  coded_findings_verified.xlsx is the full audit
+    # file: all findings, each annotated with its verification verdict.
+    logger.info("Step 7: Exporting results...")
+    not_found_ids = {
+        v.snippet_id
+        for v in verification
+        if v.verification_status == STATUS_NOT_FOUND
+    }
+    clean_findings = [
+        f for f in all_findings if f.snippet_id not in not_found_ids
+    ]
+    save_findings(clean_findings, findings_path)
+    save_errors(all_errors, errors_path)
+    save_verified_findings(all_findings, verification, verified_path)
 
     # ── Summary ────────────────────────────────────────────────────────
     logger.info("=" * 60)
@@ -559,9 +577,14 @@ def run_pipeline(resume: bool = False) -> None:
         len(verification),
         {k: verify_counts[k] for k in sorted(verify_counts)},
     )
+    logger.info(
+        "  Findings (clean):    %d kept, %d dropped as not_found",
+        len(clean_findings),
+        len(not_found_ids),
+    )
     logger.info("  Findings file:       %s", findings_path)
+    logger.info("  Verified audit file: %s", verified_path)
     logger.info("  Errors file:         %s", errors_path)
-    logger.info("  Verification file:   %s", config.VERIFY_OUTPUT)
     logger.info("=" * 60)
 
 

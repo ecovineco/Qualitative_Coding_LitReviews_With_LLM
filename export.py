@@ -61,11 +61,9 @@ ERRORS_COLUMNS = [
     "timestamp",
 ]
 
-VERIFICATION_COLUMNS = [
-    "snippet_id",
-    "finding_hash",
-    "filename",
-    "page_number",
+# Verification-specific fields appended after the standard finding fields
+# to form the full audit file (``coded_findings_verified.xlsx``).
+_VERIFICATION_EXTRA_COLUMNS = [
     "verification_status",
     "match_score",
     "match_method",
@@ -73,6 +71,8 @@ VERIFICATION_COLUMNS = [
     "page_ok",
     "matched_text",
 ]
+
+VERIFIED_FINDINGS_COLUMNS = FINDINGS_COLUMNS + _VERIFICATION_EXTRA_COLUMNS
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -203,31 +203,40 @@ def save_errors(
 # ══════════════════════════════════════════════════════════════════════
 
 
-def save_verification(
+def save_verified_findings(
+    findings: List[Any],
     results: List[Any],
     output_path: str | Path,
 ) -> None:
-    """Save snippet-verification results to an Excel file.
+    """Save the full audit file: every finding plus its verification info.
 
-    Each row records whether one finding's snippet was located in its
-    source PDF, how (exact / fragmented / fuzzy), and the best match
-    score.  The file joins back to ``coded_findings.xlsx`` on
-    ``snippet_id`` (or ``finding_hash``).
+    Each row is one finding (with all the standard ``FINDINGS_COLUMNS``
+    fields) extended with the verification verdict for its snippet
+    (status, match score/method, the page it was actually found on, and
+    the matched text for non-exact matches).  No findings are dropped —
+    this is the complete record, including any ``not_found`` rows that are
+    excluded from the deliverable ``coded_findings.xlsx``.
 
     Args:
-        results: A list of ``verify.VerificationResult`` objects (or any
-            object exposing a ``to_dict()`` method that yields the
-            ``VERIFICATION_COLUMNS`` keys).  Typed loosely so that
-            ``export`` need not import ``verify`` (keeping the dependency
-            one-directional and the import graph acyclic).
+        findings: List of ``parser.Finding`` objects, in order.
+        results: List of ``verify.VerificationResult`` objects, in the
+            same order as ``findings`` (one per finding).  Typed loosely
+            so that ``export`` need not import ``verify`` (keeping the
+            dependency one-directional and the import graph acyclic).
         output_path: Where to save the ``.xlsx`` file.
     """
     _ensure_dir(output_path)
-    rows = [r.to_dict() for r in results]
-    df = pd.DataFrame(rows, columns=VERIFICATION_COLUMNS)
-    df = df[VERIFICATION_COLUMNS]
+    rows: List[Dict[str, Any]] = []
+    for finding, result in zip(findings, results):
+        row = finding.to_dict()
+        verdict = result.to_dict()
+        for col in _VERIFICATION_EXTRA_COLUMNS:
+            row[col] = verdict.get(col)
+        rows.append(row)
+    df = pd.DataFrame(rows, columns=VERIFIED_FINDINGS_COLUMNS)
+    df = df[VERIFIED_FINDINGS_COLUMNS]
     df.to_excel(str(output_path), index=False)
-    logger.info("Saved %d verification rows to %s", len(results), output_path)
+    logger.info("Saved %d verified findings to %s", len(rows), output_path)
 
 
 # ══════════════════════════════════════════════════════════════════════

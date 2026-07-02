@@ -15,8 +15,8 @@ Inputs:
 
 Output:
 
-- An Excel file in which every row is a verbatim passage extracted from a document, tagged with a label category, label code, page number, the LLM's reasoning, a self-assessed confidence level, a unique snippet identifier, a timestamp, and a stable hash for deduplication.
-- A verification Excel file in which every coded snippet is checked back against its source PDF, confirming it is a genuine verbatim quote (or flagging it for review if it is not). This runs automatically at the end of every pipeline run and costs no API credits.
+- `coded_findings.xlsx` — the clean deliverable. One row per coded snippet, tagged with a label category, label code, page number, the LLM's reasoning, a self-assessed confidence level, a unique snippet identifier, a timestamp, and a stable hash for deduplication. Snippets that could not be located in their source PDF (status `not_found`) are excluded from this file, and it carries no verification columns.
+- `coded_findings_verified.xlsx` — the full audit file. Every finding (including the `not_found` ones excluded above), each annotated with its verification verdict: whether the snippet was located verbatim in its source PDF, how, the match score, and the page it was actually found on. Verification runs automatically at the end of every pipeline run and costs no API credits.
 
 The distinctive design choice is that the coding framework is **organised by categories**, and the pipeline runs **one batch per category**. For *N* documents and *C* categories, the pipeline submits *C* batches of *N* requests each — every request pairing one document with a prompt that contains only that category's labels. All results are merged into a single output file at the end. The rationale for this is given in Part 4.
 
@@ -115,7 +115,7 @@ Only the settings for the selected `LLM_PROVIDER` matter; the others are ignored
 python main.py
 ```
 
-The pipeline will: discover PDFs → upload each one once → loop over categories → submit a batch per category → poll → parse → merge results → write `coded_findings.xlsx`.
+The pipeline will: discover PDFs → upload each one once → loop over categories → submit a batch per category → poll → parse → merge results → verify snippets against their source PDFs → write `coded_findings.xlsx` (clean) and `coded_findings_verified.xlsx` (full audit).
 
 **Dry run** (verify prompts and request structure without spending credits):
 
@@ -131,7 +131,7 @@ Resume mode reads `outputs/batch_metadata.json` and `outputs/uploaded_file_ids.x
 
 ### Step 7 — Read the output
 
-After a successful run, `outputs/` will contain `coded_findings.xlsx` (the main deliverable), `verification.xlsx` (the snippet check), `errors.xlsx`, one `prompt_used__{CATEGORY}.txt` per category, `batch_metadata.json`, `uploaded_file_ids.xlsx`, and `pipeline.log`. The contents and schema of each file are described in Part 3.
+After a successful run, `outputs/` will contain `coded_findings.xlsx` (the clean deliverable), `coded_findings_verified.xlsx` (the full audit file with verification verdicts), `errors.xlsx`, one `prompt_used__{CATEGORY}.txt` per category, `batch_metadata.json`, `uploaded_file_ids.xlsx`, and `pipeline.log`. The contents and schema of each file are described in Part 3.
 
 ---
 
@@ -187,14 +187,14 @@ Each module has a single concern.
 - `parse_result_item()` processes one batch result: handles API failures, missing text, JSON-parse errors, invalid structures, missing required fields, and hallucinated codes (codes returned by the LLM that are not in the category's framework). Valid findings are wrapped in `Finding` objects.
 - `parse_all_results()` aggregates over all result items in one category's batch.
 
-**`export.py`** — Writes outputs to disk. Defines the canonical column orders `FINDINGS_COLUMNS`, `ERRORS_COLUMNS`, and `VERIFICATION_COLUMNS`, and the functions `save_findings()`, `save_errors()`, `save_verification()`, `save_file_mapping()` / `load_file_mapping()` for the `(filename, file_id)` mapping, and `save_batch_metadata()` / `load_batch_metadata()` for the batch metadata used by `--resume`.
+**`export.py`** — Writes outputs to disk. Defines the canonical column orders `FINDINGS_COLUMNS`, `ERRORS_COLUMNS`, and `VERIFIED_FINDINGS_COLUMNS` (the finding columns plus the appended verification fields), and the functions `save_findings()` (used for the clean `coded_findings.xlsx`), `save_errors()`, `save_verified_findings()` (the merged `coded_findings_verified.xlsx`), `save_file_mapping()` / `load_file_mapping()` for the `(filename, file_id)` mapping, and `save_batch_metadata()` / `load_batch_metadata()` for the batch metadata used by `--resume`.
 
 **`verify.py`** — Verifies that every coded snippet really appears in its source PDF — the pipeline's safeguard against fabricated quotes. Defines:
 - `normalize()`, the normalisation pipeline applied identically to snippet and document (Unicode NFKC, curly-quote/dash/ellipsis folding, de-hyphenation of line breaks, whitespace collapse, optional case-folding) so that differences introduced purely by PDF extraction don't cause a true quote to be reported as missing.
 - `extract_doc_text()`, which uses PyMuPDF to read and normalise a PDF page by page, caching the result so each document is read only once regardless of how many snippets came from it. It strips recurring page headers and footers first (margin text blocks that repeat across pages, with page numbers normalised away) — without this, a running header spliced into a sentence that spans a page break would break the match for a genuine verbatim quote. A document yielding almost no text is flagged as a scan (`no_text_layer`) rather than producing spurious failures.
 - `verify_one()`, the **match ladder**: exact normalised match (`verified`) → fragmented match for elided `...` quotes (`verified_fragmented`) → `rapidfuzz` fuzzy match (`verified_fuzzy` above the threshold, `near_match` in the grey band) → `not_found`. Short snippets cannot be auto-verified by fuzzy match alone (they can hit a high score by chance), so they are demoted to `near_match`.
 - `verify_findings()`, the orchestrator that runs the ladder over every finding and returns one `VerificationResult` each, plus `summarize()` for a status tally.
-- A standalone CLI (`python verify.py`) that re-checks an existing `coded_findings.xlsx` without re-invoking the LLM — useful for tuning thresholds. The same functions are called inline by `main.py` so verification always runs at the end of a full pipeline run.
+- A standalone CLI (`python verify.py`) that re-checks an existing findings file without re-invoking the LLM — it appends the verification columns to whatever rows it reads and writes `coded_findings_verified.xlsx` (it never modifies the input), which makes it cheap to re-run while tuning thresholds. The same `verify_findings()` function is called inline by `main.py` so verification always runs at the end of a full pipeline run.
 
 **`main.py`** — Pipeline orchestrator and CLI entry point. Provides:
 - `_setup_logging()` configures dual-stream logging (INFO to console, DEBUG to `outputs/pipeline.log`).
@@ -203,7 +203,7 @@ Each module has a single concern.
 - `build_custom_id_mapping()` reconstructs the `custom_id → filename` mapping using the same `_make_custom_id` helper as the submit side.
 - `estimate_cost()` prints a rough per-run cost estimate, parameterised by provider (batch pricing for Anthropic, synchronous pricing for Azure).
 - `_run_category()` runs the full per-category cycle: build prompt → save prompt copy → submit batch (or reuse on resume) → poll → fetch → parse.
-- `run_pipeline()` is the main entry point. After merging and exporting findings it always runs the snippet-verification stage (`verify.verify_findings()` → `export.save_verification()`) and folds a verified/total tally into the final summary. `main()` parses CLI arguments (`--resume`) and dispatches.
+- `run_pipeline()` is the main entry point. After parsing, it always runs the snippet-verification stage (`verify.verify_findings()`), then writes two files: `coded_findings.xlsx` via `save_findings()` containing only the findings that verified (every status except `not_found`) and no verification columns, and `coded_findings_verified.xlsx` via `save_verified_findings()` containing all findings annotated with their verdicts. It folds a verified/total tally and a kept/dropped count into the final summary. `main()` parses CLI arguments (`--resume`) and dispatches.
 
 ### 3.2 — How the files connect
 
@@ -223,7 +223,7 @@ A new provider only requires changes inside `api.py` (a new subclass plus an ent
 
 After a run, `outputs/` contains the following files.
 
-**`coded_findings.xlsx`** — The main deliverable. One row per coded snippet, with these columns:
+**`coded_findings.xlsx`** — The clean deliverable. One row per coded snippet whose quote was located in its source PDF; snippets with verification status `not_found` are excluded (they remain in `coded_findings_verified.xlsx`). No verification columns are added here. Columns:
 
 | Column | What it is |
 |---|---|
@@ -240,14 +240,10 @@ After a run, `outputs/` contains the following files.
 
 **`errors.xlsx`** — Any issues encountered during processing (failed uploads, malformed JSON, hallucinated codes, missing fields, API errors). Each row contains `filename`, `label_category`, `error_type`, `error_message`, `raw_text` (truncated to 2 000 characters), and `timestamp`.
 
-**`verification.xlsx`** — The result of checking every coded snippet against its source PDF. One row per finding, joined back to `coded_findings.xlsx` on `snippet_id` (or `finding_hash`):
+**`coded_findings_verified.xlsx`** — The full audit file. Every finding (including the `not_found` rows excluded from `coded_findings.xlsx`), with all the `coded_findings.xlsx` columns above plus these appended verification columns:
 
 | Column | What it is |
 |---|---|
-| `snippet_id` | Join key back to `coded_findings.xlsx`. |
-| `finding_hash` | Secondary, run-stable join key. |
-| `filename` | Source PDF filename. |
-| `page_number` | Page the model claimed. |
 | `verification_status` | `verified` (exact), `verified_fragmented` (elided `...` quote, all parts found), `verified_fuzzy` (minor edits), `near_match` (likely present, flagged for review), `not_found` (could not be located — strongest fabrication signal), `no_text_layer` (scanned PDF, cannot verify), or `pdf_missing` (source file not on disk). |
 | `match_score` | Best similarity score, 0–100. |
 | `match_method` | `exact`, `fragmented`, `fuzzy`, or `none`. |
@@ -337,7 +333,9 @@ Every snippet is supposed to be a verbatim quote, but the model is trusted on th
 
 **Page numbers are a soft signal.** Models report the *printed* page number, which is offset from the physical PDF page by cover pages and front matter, so a page mismatch is recorded as a warning (`page_ok = False`) rather than a failure.
 
-**It always runs, and it's free.** Verification needs no API credits, so it runs automatically at the end of every full pipeline run. It is also exposed as a standalone CLI (`python verify.py`) that re-checks an existing `coded_findings.xlsx`, which makes it cheap to tune the thresholds in `config.py` against your own corpus without re-coding anything. The behaviour of the normalisation pipeline and the ladder is locked down by `test_verify.py`, which exercises each known failure mode (hyphenation, ligatures, smart quotes, page-spanning quotes, elision, fabrication, and scanned PDFs).
+**Two files: a clean deliverable and a full audit.** The pipeline writes `coded_findings.xlsx` with only the findings that verified (every status except `not_found`) and no verification columns — the file a researcher actually works from — and `coded_findings_verified.xlsx` with every finding plus its verdict. Nothing is silently lost: a `not_found` is dropped from the clean file but preserved, with its score and matched text, in the audit file, so a reviewer can confirm whether it was a genuine fabrication or (as happened on the bundled paper before the header fix) an extraction artifact. Only `not_found` is filtered out; `near_match`, `no_text_layer`, and `pdf_missing` rows are kept in the clean file, since they are not confirmed-absent quotes.
+
+**It always runs, and it's free.** Verification needs no API credits, so it runs automatically at the end of every full pipeline run. It is also exposed as a standalone CLI (`python verify.py`) that re-checks an existing findings file and writes `coded_findings_verified.xlsx` without modifying the input, which makes it cheap to tune the thresholds in `config.py` against your own corpus without re-coding anything. The behaviour of the normalisation pipeline and the ladder is locked down by `test_verify.py`, which exercises each known failure mode (hyphenation, ligatures, smart quotes, page-spanning quotes, elision, fabrication, and scanned PDFs).
 
 
 ## Part 5 — Data Privacy
@@ -350,7 +348,7 @@ This pipeline sends document content to either Azure OpenAI or Anthropic for pro
 
 ### Change 1 — Done
 
-Verify, for each extracted snippet, that it really exists in the source text. **Implemented** in `verify.py` and run automatically at the end of every pipeline run (see Part 4.10). The result is written to `outputs/verification.xlsx`.
+Verify, for each extracted snippet, that it really exists in the source text. **Implemented** in `verify.py` and run automatically at the end of every pipeline run (see Part 4.10). Snippets that cannot be located are dropped from `coded_findings.xlsx`, and the full verdict for every finding is written to `outputs/coded_findings_verified.xlsx`.
 
 ### Change 2
 

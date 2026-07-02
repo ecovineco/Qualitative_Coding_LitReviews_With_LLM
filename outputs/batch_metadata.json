@@ -20,11 +20,11 @@
   "batches": [
     {
       "category": "CPVR_EFFECTIVENESS",
-      "batch_id": "azurebatch_d2f1d86649bb4ab2939e8d5d"
+      "batch_id": "azurebatch_fab2d89ac808484189e43ca6"
     },
     {
       "category": "CPVR_LEGAL",
-      "batch_id": "azurebatch_f53b3b65191143fa8de41ace"
+      "batch_id": "azurebatch_5486bc64a6d74cc894c5be7c"
     }
   ]
 }
