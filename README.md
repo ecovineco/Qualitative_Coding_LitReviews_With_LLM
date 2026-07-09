@@ -352,4 +352,8 @@ Verify, for each extracted snippet, that it really exists in the source text. **
 
 ### Change 2
 
+Identification of the page number should not be done by the LLM, but should be done in the verification phase (when verifying if the snippet actually exists): the page number within the actual pdf (and not the page number written in the document) should be retained then.
+
+### Change 3
+
 Metrics to identify false positives and false negatives. This still requires a hand-coded gold standard to measure against; the snippet-existence check in Change 1 already provides one half of the false-positive story (fabricated quotes), but precision and recall against expert coding remain future work.
