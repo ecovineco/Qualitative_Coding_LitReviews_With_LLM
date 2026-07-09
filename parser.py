@@ -60,7 +60,12 @@ class Finding:
         label_category: Category this finding was coded under.
         label_code: Code within the category.
         snippet: Verbatim quote from the document.
-        page_number: Page where the snippet was found.
+        page_number: The physical PDF page the snippet was found on.
+            The LLM is never asked for this; it is ``None`` at parse
+            time and is filled in afterwards by the verification stage
+            (``verify.py``), which is the only place a page number is
+            ever determined. Stays ``None`` if the snippet could not be
+            located.
         reasoning: Why this snippet was coded under this label.
         confidence: LLM's self-assessed confidence (high/medium/low).
         snippet_id: Human-readable unique id that encodes source and
@@ -345,15 +350,9 @@ def parse_result_item(
             )
             continue
 
-        # Coerce page number if present.
-        page = raw.get("page_number")
-        if page is not None:
-            try:
-                page = int(page)
-            except (ValueError, TypeError):
-                page = None
-
-        # Assign sequence and build the finding.
+        # Assign sequence and build the finding.  ``page_number`` is left
+        # at its default (``None``) here — it is no longer requested from
+        # the LLM and is filled in later by the verification stage.
         seq += 1
         snippet_id = _make_snippet_id(filename, category, seq)
 
@@ -362,7 +361,6 @@ def parse_result_item(
             label_category=category,
             label_code=label_code,
             snippet=snippet,
-            page_number=page,
             reasoning=str(raw.get("reasoning", "")).strip(),
             confidence=str(raw.get("confidence", "")).strip().lower(),
             snippet_id=snippet_id,

@@ -12,11 +12,11 @@
   "batches": [
     {
       "category": "CPVR_EFFECTIVENESS",
-      "batch_id": "azurebatch_8b2deff6cb114dac8c5f80f2"
+      "batch_id": "azurebatch_d5f8be0a0cd84dd4958752af"
     },
     {
       "category": "CPVR_LEGAL",
-      "batch_id": "azurebatch_90aaca342078459b9251c0d7"
+      "batch_id": "azurebatch_0f1f51cc60b6465b91183d48"
     }
   ]
 }

@@ -51,7 +51,6 @@ def build_analysis_prompt(
         '        {\n'
         '            "label_code": "the label code from the framework above",\n'
         '            "snippet": "verbatim quote from the PDF",\n'
-        '            "page_number": 1,\n'
         '            "reasoning": "brief explanation of why this snippet '
         'matches the label"'
     )
@@ -88,22 +87,21 @@ Use EXACTLY this structure:
 ## Rules
 
 1. Use verbatim quotes for the "snippet" field.  Do NOT paraphrase.
-2. Provide best-effort page numbers based on the document.
-3. The "label_code" MUST be one of the codes defined above.  Do NOT invent
+2. The "label_code" MUST be one of the codes defined above.  Do NOT invent
    new codes.
-4. If a label is not present in the document, simply omit it.  Do NOT
+3. If a label is not present in the document, simply omit it.  Do NOT
    fabricate content.
-5. Keep each snippet concise but sufficient — typically 1 to 5 sentences.
-6. A single passage may be relevant to multiple labels.  In that case,
+4. Keep each snippet concise but sufficient — typically 1 to 5 sentences.
+5. A single passage may be relevant to multiple labels.  In that case,
    create one finding entry per label with the same snippet.
-7. Pay close attention to the inclusion AND exclusion criteria for each
+6. Pay close attention to the inclusion AND exclusion criteria for each
    label.  Only code a passage if it meets the inclusion criteria and does
    NOT meet the exclusion criteria.
 """
 
     if include_confidence:
         prompt += """\
-8. For the "confidence" field, assess how clearly the snippet matches the
+7. For the "confidence" field, assess how clearly the snippet matches the
    label:
    - "high"   — clearly and directly relevant.
    - "medium" — relevant but somewhat ambiguous.

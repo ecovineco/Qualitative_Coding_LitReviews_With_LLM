@@ -147,7 +147,9 @@ UPLOAD_RETRY_DELAY: int = 5
 
 # After coding, every snippet is checked against its source PDF to
 # confirm it is a real verbatim quote (see ``verify.py``).  This stage
-# always runs at the end of the pipeline; it needs no API credits.
+# always runs at the end of the pipeline; it needs no API credits.  It
+# is also the only source of each finding's page number — the LLM is
+# never asked for one (see ``prompt.py``).
 
 PDF_SOURCE_DIR: str = TARGET_FOLDER
 """Directory holding the original PDFs, used to verify snippets.
@@ -166,7 +168,8 @@ Written alongside ``coded_findings.xlsx`` at the end of every run.
 findings whose snippet was located in the source PDF (i.e. every status
 except ``not_found``) and carries no verification columns.  This file
 contains *all* findings, including ``not_found`` ones, each annotated
-with its verification status, score, method and matched page.
+with its verification status, score, method, and the page it was found
+on.
 """
 
 VERIFY_FUZZY_THRESHOLD: int = 95
@@ -185,13 +188,6 @@ VERIFY_MIN_LEN_FOR_FUZZY: int = 40
 Short snippets can reach a high fuzzy score by chance, so a fuzzy match
 on a shorter snippet is demoted to ``near_match`` instead of
 ``verified_fuzzy``.
-"""
-
-VERIFY_PAGE_TOLERANCE: int = 1
-"""Allowed difference between the claimed and matched page for ``page_ok``.
-
-A soft signal only: models usually report the *printed* page number,
-which is offset from the physical PDF page by front matter.
 """
 
 VERIFY_NO_TEXT_LAYER_CHARS: int = 50

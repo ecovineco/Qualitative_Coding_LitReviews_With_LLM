@@ -9,6 +9,12 @@ This is the pipeline's only safeguard against fabricated quotes.  A
 snippet that cannot be located in the source is the strongest available
 signal that the model invented or distorted it.
 
+This module is also the *only* source of each finding's page number.
+The LLM is never asked for one (see ``prompt.py``); instead, whichever
+rung of the match ladder below locates a snippet also records the
+physical PDF page it was found on, via ``DocText.page_at()``.  A
+snippet that cannot be located at all has no page number to report.
+
 Why a simple ``snippet in document_text`` test is not enough
 ------------------------------------------------------------
 PDF text extraction is lossy and models silently tidy quotes, so a naive
@@ -125,15 +131,12 @@ class FindingRecord:
         finding_hash: Stable dedup hash of the finding (secondary join
             key, stable across runs).
         filename: Source PDF filename (used to locate the PDF on disk).
-        page_number: Page the model claimed the snippet came from, if
-            any.  May be ``None``.
         snippet: The verbatim quote to verify.
     """
 
     snippet_id: str
     finding_hash: str
     filename: str
-    page_number: Optional[int]
     snippet: str
 
 
@@ -145,7 +148,6 @@ class VerificationResult:
         snippet_id: Join key back to the findings table.
         finding_hash: Secondary, run-stable join key.
         filename: Source PDF filename.
-        page_number: Page the model claimed (echoed from the finding).
         verification_status: One of the ``STATUS_*`` constants.
         match_score: Best similarity score on a 0-100 scale.  ``100.0``
             for exact / fragmented matches, the fuzzy score otherwise,
@@ -153,13 +155,12 @@ class VerificationResult:
             a near miss is distinguishable from total absence).
         match_method: Which rung of the ladder produced the result —
             ``"exact"``, ``"fragmented"``, ``"fuzzy"`` or ``"none"``.
-        matched_page: The 1-based *physical* PDF page where the snippet
-            was located, or ``None``.  May differ from ``page_number``
-            because models usually report the *printed* page number,
-            which is offset by cover pages and front matter.
-        page_ok: ``True`` if ``matched_page`` is within
-            ``config.VERIFY_PAGE_TOLERANCE`` of the claimed page,
-            ``False`` if not, ``None`` if either page is unknown.
+        page_number: The 1-based *physical* PDF page the snippet was
+            located on.  This is the only place a page number is ever
+            determined — it is never supplied by the LLM (see
+            ``prompt.py``) — and it is ``None`` whenever the snippet
+            could not be located at all (``not_found``,
+            ``no_text_layer``, ``pdf_missing``).
         matched_text: For non-exact matches, the slice of normalised
             document text that matched — kept so a human can adjudicate
             ``verified_fuzzy`` / ``near_match`` rows.  Empty for exact
@@ -169,12 +170,10 @@ class VerificationResult:
     snippet_id: str
     finding_hash: str
     filename: str
-    page_number: Optional[int]
     verification_status: str
     match_score: float = 0.0
     match_method: str = "none"
-    matched_page: Optional[int] = None
-    page_ok: Optional[bool] = None
+    page_number: Optional[int] = None
     matched_text: str = ""
 
     def to_dict(self) -> Dict[str, Any]:
@@ -189,12 +188,10 @@ class VerificationResult:
             "snippet_id": self.snippet_id,
             "finding_hash": self.finding_hash,
             "filename": self.filename,
-            "page_number": self.page_number,
             "verification_status": self.verification_status,
             "match_score": round(self.match_score, 1),
             "match_method": self.match_method,
-            "matched_page": self.matched_page,
-            "page_ok": self.page_ok,
+            "page_number": self.page_number,
             "matched_text": self.matched_text[:2000],
         }
 
@@ -544,6 +541,11 @@ def verify_one(record: FindingRecord, doc: DocText) -> VerificationResult:
     long; shorter fuzzy hits are demoted to ``near_match`` for a human to
     confirm.
 
+    Whichever rung succeeds also determines ``page_number`` via
+    ``doc.page_at()`` — the physical PDF page the match was found on.
+    This is the only place a page number is ever produced; a snippet
+    that falls through every rung (``not_found``) has no page to report.
+
     Args:
         record: The finding to verify.
         doc: The cached, normalised text of its source document.
@@ -555,7 +557,6 @@ def verify_one(record: FindingRecord, doc: DocText) -> VerificationResult:
         snippet_id=record.snippet_id,
         finding_hash=record.finding_hash,
         filename=record.filename,
-        page_number=record.page_number,
     )
 
     if not doc.has_text_layer:
@@ -570,14 +571,12 @@ def verify_one(record: FindingRecord, doc: DocText) -> VerificationResult:
     # --- Rung 1: exact normalised substring -----------------------------
     idx = doc.full_cf.find(snippet_cf)
     if idx != -1:
-        page = doc.page_at(idx)
         return VerificationResult(
             **base,
             verification_status=STATUS_VERIFIED,
             match_score=100.0,
             match_method="exact",
-            matched_page=page,
-            page_ok=_page_ok(record.page_number, page),
+            page_number=doc.page_at(idx),
         )
 
     # --- Rung 2: fragmented (elided) snippet ----------------------------
@@ -601,21 +600,18 @@ def verify_one(record: FindingRecord, doc: DocText) -> VerificationResult:
             positions.append(pos)
             cursor = pos + len(frag_cf)
         if all_found and positions:
-            page = doc.page_at(min(positions))
             return VerificationResult(
                 **base,
                 verification_status=STATUS_VERIFIED_FRAGMENTED,
                 match_score=100.0,
                 match_method="fragmented",
-                matched_page=page,
-                page_ok=_page_ok(record.page_number, page),
+                page_number=doc.page_at(min(positions)),
             )
 
     # --- Rung 3: fuzzy partial match ------------------------------------
     alignment = _fuzzy_partial(snippet_cf, doc.full_cf)
     score = float(alignment.score)
     if score >= config.VERIFY_NEAR_THRESHOLD:
-        page = doc.page_at(alignment.dest_start)
         window = doc.full_display[alignment.dest_start : alignment.dest_end]
         long_enough = len(snippet_cf) >= config.VERIFY_MIN_LEN_FOR_FUZZY
         status = (
@@ -628,8 +624,7 @@ def verify_one(record: FindingRecord, doc: DocText) -> VerificationResult:
             verification_status=status,
             match_score=score,
             match_method="fuzzy",
-            matched_page=page,
-            page_ok=_page_ok(record.page_number, page),
+            page_number=doc.page_at(alignment.dest_start),
             matched_text=window,
         )
 
@@ -640,26 +635,6 @@ def verify_one(record: FindingRecord, doc: DocText) -> VerificationResult:
         match_score=score,
         match_method="none",
     )
-
-
-def _page_ok(claimed: Optional[int], matched: Optional[int]) -> Optional[bool]:
-    """Whether the matched page is close enough to the claimed page.
-
-    Treated as a *soft* signal: models usually report the printed page
-    number, which is offset from the physical PDF page index by cover
-    pages and front matter, so a mismatch is a warning, not a failure.
-
-    Args:
-        claimed: Page the model reported (may be ``None``).
-        matched: Physical page the snippet was found on (may be ``None``).
-
-    Returns:
-        ``True`` / ``False`` within tolerance, or ``None`` if either page
-        is unknown.
-    """
-    if claimed is None or matched is None:
-        return None
-    return abs(claimed - matched) <= config.VERIFY_PAGE_TOLERANCE
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -678,8 +653,8 @@ def verify_findings(
 
     Args:
         findings: A sequence of finding-like objects.  Each must expose
-            ``snippet_id``, ``finding_hash``, ``filename``, ``snippet``
-            and ``page_number`` — both the ``Finding`` dataclass from
+            ``snippet_id``, ``finding_hash``, ``filename`` and
+            ``snippet`` — both the ``Finding`` dataclass from
             ``parser.py`` and :class:`FindingRecord` qualify.
         pdf_dir: Directory holding the original PDFs.  Defaults to
             ``config.PDF_SOURCE_DIR``.
@@ -717,7 +692,6 @@ def verify_findings(
                     snippet_id=rec.snippet_id,
                     finding_hash=rec.finding_hash,
                     filename=rec.filename,
-                    page_number=rec.page_number,
                     verification_status=STATUS_PDF_MISSING,
                 )
             )
@@ -744,7 +718,6 @@ def _as_record(obj: Any) -> FindingRecord:
         snippet_id=getattr(obj, "snippet_id", ""),
         finding_hash=getattr(obj, "finding_hash", ""),
         filename=getattr(obj, "filename", ""),
-        page_number=getattr(obj, "page_number", None),
         snippet=getattr(obj, "snippet", ""),
     )
 
@@ -806,17 +779,11 @@ def _records_from_excel(findings_path: str | Path) -> List[FindingRecord]:
     df = pd.read_excel(str(path), dtype=str).fillna("")
     records: List[FindingRecord] = []
     for _, row in df.iterrows():
-        page_raw = str(row.get("page_number", "")).strip()
-        try:
-            page = int(float(page_raw)) if page_raw else None
-        except (ValueError, TypeError):
-            page = None
         records.append(
             FindingRecord(
                 snippet_id=row.get("snippet_id", ""),
                 finding_hash=row.get("finding_hash", ""),
                 filename=row.get("filename", ""),
-                page_number=page,
                 snippet=row.get("snippet", ""),
             )
         )
@@ -861,6 +828,11 @@ def run_verification_cli(
 
     verdicts = {r.snippet_id: r.to_dict() for r in results}
     sids = df["snippet_id"] if "snippet_id" in df.columns else [""] * len(df)
+    # ``page_number`` is a base findings column (it sits alongside
+    # ``snippet`` and ``reasoning`` in ``coded_findings.xlsx``), but its
+    # value is produced entirely by this verification pass, so it is
+    # recomputed here rather than left at whatever the input file had.
+    df["page_number"] = [verdicts.get(sid, {}).get("page_number") for sid in sids]
     for col in _VERIFICATION_EXTRA_COLUMNS:
         df[col] = [verdicts.get(sid, {}).get(col) for sid in sids]
 

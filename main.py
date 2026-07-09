@@ -540,11 +540,19 @@ def run_pipeline(resume: bool = False) -> None:
 
     # ── Step 6: Verify snippets against their source PDFs ──────────────
     # Always runs; needs no API credits.  Confirms each coded snippet is a
-    # real verbatim quote from its source document.
+    # real verbatim quote from its source document.  This is also where
+    # every finding's page_number comes from: the LLM is never asked for
+    # one (see prompt.py), so verification is the sole source of it — the
+    # physical PDF page the match ladder actually located the snippet on.
     logger.info("Step 6: Verifying snippets against source PDFs...")
     verification = verify_findings(all_findings, pdf_dir=config.PDF_SOURCE_DIR)
     verify_counts = summarize(verification)
     verified_total = sum(verify_counts.get(s, 0) for s in VERIFIED_STATUSES)
+
+    verdict_by_id = {v.snippet_id: v for v in verification}
+    for finding in all_findings:
+        verdict = verdict_by_id.get(finding.snippet_id)
+        finding.page_number = verdict.page_number if verdict else None
 
     # ── Step 7: Export results ─────────────────────────────────────────
     # coded_findings.xlsx is the clean deliverable: every finding except

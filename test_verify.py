@@ -54,12 +54,11 @@ def _make_doc() -> DocText:
     )
 
 
-def _verify(snippet: str, page: int | None = 1) -> verify.VerificationResult:
+def _verify(snippet: str) -> verify.VerificationResult:
     rec = FindingRecord(
         snippet_id="t",
         finding_hash="h",
         filename="sample.pdf",
-        page_number=page,
         snippet=snippet,
     )
     return verify_one(rec, _make_doc())
@@ -79,7 +78,7 @@ def run() -> None:
     r = _verify("The breeder's rights regime promotes innovation")
     assert r.verification_status == STATUS_VERIFIED, r.verification_status
     assert r.match_score == 100.0
-    assert r.matched_page == 1
+    assert r.page_number == 1
 
     # 3. A quote crossing the hyphenated line break -> still verified.
     r = _verify("firmly across the innovation pipeline")
@@ -107,20 +106,25 @@ def run() -> None:
         r.verification_status
     )
 
-    # 8. A fabricated quote -> not_found.
+    # 8. A fabricated quote -> not_found, and therefore no page number:
+    # nothing matched, so there is nothing to report a page for.
     r = _verify(
         "This study found a ninety percent increase in seed exports to "
         "the European Union following ratification."
     )
     assert r.verification_status == STATUS_NOT_FOUND, r.verification_status
+    assert r.page_number is None, r.page_number
 
-    # 9. Page attribution: claimed page 5, content actually on page 2.
-    r = _verify("compulsory licensing and farmers rights", page=5)
-    assert r.matched_page == 2 and r.page_ok is False, (r.matched_page, r.page_ok)
+    # 9. Page attribution: content that only appears on the second "page"
+    # is attributed to physical page 2, purely from where the match
+    # ladder locates it (there is no claimed page to compare against —
+    # the LLM is never asked for one).
+    r = _verify("compulsory licensing and farmers rights")
+    assert r.page_number == 2, r.page_number
 
     # 10. A scanned PDF (no text layer) -> no_text_layer, never not_found.
     empty = DocText(filename="scan.pdf", has_text_layer=False)
-    rec = FindingRecord("t", "h", "scan.pdf", 1, "anything at all")
+    rec = FindingRecord("t", "h", "scan.pdf", "anything at all")
     assert verify_one(rec, empty).verification_status == verify.STATUS_NO_TEXT_LAYER
 
     test_detect_boilerplate()
@@ -179,7 +183,6 @@ def test_header_injection_across_page_break() -> None:
         snippet_id="t",
         finding_hash="h",
         filename="injection.pdf",
-        page_number=1,
         snippet="to grant breeders rights and perform other necessary functions",
     )
 

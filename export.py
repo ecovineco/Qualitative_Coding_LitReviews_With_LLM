@@ -62,13 +62,14 @@ ERRORS_COLUMNS = [
 ]
 
 # Verification-specific fields appended after the standard finding fields
-# to form the full audit file (``coded_findings_verified.xlsx``).
+# to form the full audit file (``coded_findings_verified.xlsx``).  Note
+# that ``page_number`` above is *not* repeated here: it is a base finding
+# field, and verification populates it directly rather than exposing a
+# separate "matched page" column.
 _VERIFICATION_EXTRA_COLUMNS = [
     "verification_status",
     "match_score",
     "match_method",
-    "matched_page",
-    "page_ok",
     "matched_text",
 ]
 
@@ -211,11 +212,13 @@ def save_verified_findings(
     """Save the full audit file: every finding plus its verification info.
 
     Each row is one finding (with all the standard ``FINDINGS_COLUMNS``
-    fields) extended with the verification verdict for its snippet
-    (status, match score/method, the page it was actually found on, and
-    the matched text for non-exact matches).  No findings are dropped —
-    this is the complete record, including any ``not_found`` rows that are
-    excluded from the deliverable ``coded_findings.xlsx``.
+    fields — including ``page_number``, which the caller is expected to
+    have already set from the matching ``VerificationResult`` before
+    calling this function) extended with the verification verdict for
+    its snippet (status, match score/method, and the matched text for
+    non-exact matches).  No findings are dropped — this is the complete
+    record, including any ``not_found`` rows that are excluded from the
+    deliverable ``coded_findings.xlsx``.
 
     Args:
         findings: List of ``parser.Finding`` objects, in order.

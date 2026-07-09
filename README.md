@@ -15,7 +15,7 @@ Inputs:
 
 Output:
 
-- `coded_findings.xlsx` — the clean deliverable. One row per coded snippet, tagged with a label category, label code, page number, the LLM's reasoning, a self-assessed confidence level, a unique snippet identifier, a timestamp, and a stable hash for deduplication. Snippets that could not be located in their source PDF (status `not_found`) are excluded from this file, and it carries no verification columns.
+- `coded_findings.xlsx` — the clean deliverable. One row per coded snippet, tagged with a label category, label code, the physical PDF page it was found on (determined by the verification stage, never by the LLM — see Part 4.10), the LLM's reasoning, a self-assessed confidence level, a unique snippet identifier, a timestamp, and a stable hash for deduplication. Snippets that could not be located in their source PDF (status `not_found`) are excluded from this file, and it carries no verification columns.
 - `coded_findings_verified.xlsx` — the full audit file. Every finding (including the `not_found` ones excluded above), each annotated with its verification verdict: whether the snippet was located verbatim in its source PDF, how, the match score, and the page it was actually found on. Verification runs automatically at the end of every pipeline run and costs no API credits.
 
 The distinctive design choice is that the coding framework is **organised by categories**, and the pipeline runs **one batch per category**. For *N* documents and *C* categories, the pipeline submits *C* batches of *N* requests each — every request pairing one document with a prompt that contains only that category's labels. All results are merged into a single output file at the end. The rationale for this is given in Part 4.
@@ -180,7 +180,7 @@ Each module has a single concern.
 - The `_PROVIDERS` registry mapping provider name to client class, and the `get_llm_client()` factory function used by the rest of the codebase.
 
 **`parser.py`** — Parses and validates LLM responses. Defines:
-- The `Finding` dataclass with all output fields, including `snippet_id`, `timestamp`, and `finding_hash` computed in `__post_init__`.
+- The `Finding` dataclass with all output fields, including `snippet_id`, `timestamp`, and `finding_hash` computed in `__post_init__`. `page_number` is left as `None` here — the LLM is never asked for one — and is filled in later by the verification stage (Part 4.10).
 - The `ParseError` dataclass for errors, also auto-timestamped.
 - `_clean_json_text()` strips common LLM artefacts (markdown fences, preamble text).
 - `_make_snippet_id(filename, category, seq)` builds a human-readable unique identifier of the form `{stem}__{CATEGORY}__{NNNN}`.
@@ -189,12 +189,12 @@ Each module has a single concern.
 
 **`export.py`** — Writes outputs to disk. Defines the canonical column orders `FINDINGS_COLUMNS`, `ERRORS_COLUMNS`, and `VERIFIED_FINDINGS_COLUMNS` (the finding columns plus the appended verification fields), and the functions `save_findings()` (used for the clean `coded_findings.xlsx`), `save_errors()`, `save_verified_findings()` (the merged `coded_findings_verified.xlsx`), `save_file_mapping()` / `load_file_mapping()` for the `(filename, file_id)` mapping, and `save_batch_metadata()` / `load_batch_metadata()` for the batch metadata used by `--resume`.
 
-**`verify.py`** — Verifies that every coded snippet really appears in its source PDF — the pipeline's safeguard against fabricated quotes. Defines:
+**`verify.py`** — Verifies that every coded snippet really appears in its source PDF — the pipeline's safeguard against fabricated quotes. Also the sole source of each finding's page number (see Part 4.10) — the LLM is never asked for one. Defines:
 - `normalize()`, the normalisation pipeline applied identically to snippet and document (Unicode NFKC, curly-quote/dash/ellipsis folding, de-hyphenation of line breaks, whitespace collapse, optional case-folding) so that differences introduced purely by PDF extraction don't cause a true quote to be reported as missing.
 - `extract_doc_text()`, which uses PyMuPDF to read and normalise a PDF page by page, caching the result so each document is read only once regardless of how many snippets came from it. It strips recurring page headers and footers first (margin text blocks that repeat across pages, with page numbers normalised away) — without this, a running header spliced into a sentence that spans a page break would break the match for a genuine verbatim quote. A document yielding almost no text is flagged as a scan (`no_text_layer`) rather than producing spurious failures.
-- `verify_one()`, the **match ladder**: exact normalised match (`verified`) → fragmented match for elided `...` quotes (`verified_fragmented`) → `rapidfuzz` fuzzy match (`verified_fuzzy` above the threshold, `near_match` in the grey band) → `not_found`. Short snippets cannot be auto-verified by fuzzy match alone (they can hit a high score by chance), so they are demoted to `near_match`.
+- `verify_one()`, the **match ladder**: exact normalised match (`verified`) → fragmented match for elided `...` quotes (`verified_fragmented`) → `rapidfuzz` fuzzy match (`verified_fuzzy` above the threshold, `near_match` in the grey band) → `not_found`. Short snippets cannot be auto-verified by fuzzy match alone (they can hit a high score by chance), so they are demoted to `near_match`. Whichever rung succeeds also records the physical PDF page the match was found on (via `DocText.page_at()`), which becomes that finding's `page_number`; a `not_found` (or `no_text_layer` / `pdf_missing`) result has none.
 - `verify_findings()`, the orchestrator that runs the ladder over every finding and returns one `VerificationResult` each, plus `summarize()` for a status tally.
-- A standalone CLI (`python verify.py`) that re-checks an existing findings file without re-invoking the LLM — it appends the verification columns to whatever rows it reads and writes `coded_findings_verified.xlsx` (it never modifies the input), which makes it cheap to re-run while tuning thresholds. The same `verify_findings()` function is called inline by `main.py` so verification always runs at the end of a full pipeline run.
+- A standalone CLI (`python verify.py`) that re-checks an existing findings file without re-invoking the LLM — it recomputes `page_number` and appends the verification columns for whatever rows it reads, then writes `coded_findings_verified.xlsx` (it never modifies the input), which makes it cheap to re-run while tuning thresholds. The same `verify_findings()` function is called inline by `main.py` so verification always runs at the end of a full pipeline run.
 
 **`main.py`** — Pipeline orchestrator and CLI entry point. Provides:
 - `_setup_logging()` configures dual-stream logging (INFO to console, DEBUG to `outputs/pipeline.log`).
@@ -203,7 +203,7 @@ Each module has a single concern.
 - `build_custom_id_mapping()` reconstructs the `custom_id → filename` mapping using the same `_make_custom_id` helper as the submit side.
 - `estimate_cost()` prints a rough per-run cost estimate, parameterised by provider (batch pricing for Anthropic, synchronous pricing for Azure).
 - `_run_category()` runs the full per-category cycle: build prompt → save prompt copy → submit batch (or reuse on resume) → poll → fetch → parse.
-- `run_pipeline()` is the main entry point. After parsing, it always runs the snippet-verification stage (`verify.verify_findings()`), then writes two files: `coded_findings.xlsx` via `save_findings()` containing only the findings that verified (every status except `not_found`) and no verification columns, and `coded_findings_verified.xlsx` via `save_verified_findings()` containing all findings annotated with their verdicts. It folds a verified/total tally and a kept/dropped count into the final summary. `main()` parses CLI arguments (`--resume`) and dispatches.
+- `run_pipeline()` is the main entry point. After parsing, it always runs the snippet-verification stage (`verify.verify_findings()`) and uses its results to set each finding's `page_number` (the LLM is never asked for one), then writes two files: `coded_findings.xlsx` via `save_findings()` containing only the findings that verified (every status except `not_found`) and no verification columns, and `coded_findings_verified.xlsx` via `save_verified_findings()` containing all findings annotated with their verdicts. It folds a verified/total tally and a kept/dropped count into the final summary. `main()` parses CLI arguments (`--resume`) and dispatches.
 
 ### 3.2 — How the files connect
 
@@ -232,7 +232,7 @@ After a run, `outputs/` contains the following files.
 | `label_category` | Category this snippet was coded under. |
 | `label_code` | Specific code within the category. |
 | `snippet` | Verbatim quote from the document. |
-| `page_number` | Page where the snippet was found. |
+| `page_number` | The physical PDF page the snippet was found on, determined by the verification stage — never by the LLM (see Part 4.10). Blank if the snippet could not be located (`not_found`, `no_text_layer`, or `pdf_missing`). |
 | `reasoning` | The LLM's explanation for why the snippet was coded under this label. |
 | `confidence` | `high`, `medium`, or `low`. |
 | `timestamp` | ISO-8601 timestamp of when the row was produced. |
@@ -240,15 +240,13 @@ After a run, `outputs/` contains the following files.
 
 **`errors.xlsx`** — Any issues encountered during processing (failed uploads, malformed JSON, hallucinated codes, missing fields, API errors). Each row contains `filename`, `label_category`, `error_type`, `error_message`, `raw_text` (truncated to 2 000 characters), and `timestamp`.
 
-**`coded_findings_verified.xlsx`** — The full audit file. Every finding (including the `not_found` rows excluded from `coded_findings.xlsx`), with all the `coded_findings.xlsx` columns above plus these appended verification columns:
+**`coded_findings_verified.xlsx`** — The full audit file. Every finding (including the `not_found` rows excluded from `coded_findings.xlsx`), with all the `coded_findings.xlsx` columns above — including `page_number`, populated by this same verification pass — plus these appended columns:
 
 | Column | What it is |
 |---|---|
 | `verification_status` | `verified` (exact), `verified_fragmented` (elided `...` quote, all parts found), `verified_fuzzy` (minor edits), `near_match` (likely present, flagged for review), `not_found` (could not be located — strongest fabrication signal), `no_text_layer` (scanned PDF, cannot verify), or `pdf_missing` (source file not on disk). |
 | `match_score` | Best similarity score, 0–100. |
 | `match_method` | `exact`, `fragmented`, `fuzzy`, or `none`. |
-| `matched_page` | The *physical* PDF page the snippet was found on (may differ from `page_number` — see below). |
-| `page_ok` | Whether `matched_page` is within `VERIFY_PAGE_TOLERANCE` of the claimed page. |
 | `matched_text` | For non-exact matches, the document text that matched, so a human can adjudicate. |
 
 **`prompt_used__{CATEGORY}.txt`** — One plain-text file per category, containing the exact prompt that was sent to the LLM for that category. Saved for reproducibility and audit purposes.
@@ -321,7 +319,7 @@ Azure OpenAI is invoked synchronously by this pipeline (no batch discount); actu
 
 ### 4.10 — Snippet verification as a separate, always-on stage
 
-Every snippet is supposed to be a verbatim quote, but the model is trusted on that at coding time. The verification stage (`verify.py`) closes that gap by extracting each PDF's own text and confirming the snippet is really there. Several choices shape it:
+Every snippet is supposed to be a verbatim quote, but the model is trusted on that at coding time. The verification stage (`verify.py`) closes that gap by extracting each PDF's own text and confirming the snippet is really there — and, since it is doing that lookup anyway, it is also the *only* place a finding's page number ever comes from. Several choices shape it:
 
 **A graded match ladder, not a boolean test.** A naive `snippet in document_text` check reports huge numbers of *false* "not found" results, because PDF extraction and harmless model tidying introduce differences that are invisible to a human: line-break hyphenation, ligatures, smart quotes, en/em dashes, and exotic spaces. So both the snippet and the document are run through the *same* normalisation pipeline, and matching then climbs a ladder from cheap-and-certain to forgiving-and-scored — exact, fragmented (for elided `...` quotes), then fuzzy — recording which rung succeeded. A passage that genuinely isn't there falls all the way through to `not_found`, which is the strongest available signal of a fabricated quote.
 
@@ -331,9 +329,9 @@ Every snippet is supposed to be a verbatim quote, but the model is trusted on th
 
 **Strip running headers and footers.** PDF extraction routinely splices a page's running header (author, journal, page number) into the middle of a sentence that continues onto the next page. Left in, that intrusion breaks the match for a quote that is genuinely verbatim. The extractor therefore detects margin text blocks whose content recurs across pages (ignoring the varying page number) and removes them before matching. On the bundled Adelaiye paper this is the difference between four spurious failures and all snippets verifying.
 
-**Page numbers are a soft signal.** Models report the *printed* page number, which is offset from the physical PDF page by cover pages and front matter, so a page mismatch is recorded as a warning (`page_ok = False`) rather than a failure.
+**Page numbers come from the match, not the model.** Earlier versions asked the LLM to report a page number alongside each snippet, then cross-checked it here. That never worked well: spotting which page a passage sits on isn't a task an LLM is well-suited to, and it routinely confused the *printed* page number on the page itself with the PDF's physical page index — the two disagree as soon as a document has a cover page, an abstract, or unnumbered front matter (on the bundled Adelaiye paper, physical page 2 is printed as page "452"). So the LLM is no longer asked for a page number at all — it isn't even part of the JSON schema in `prompt.py` — and `page_number` is populated entirely by this stage instead: whichever rung of the match ladder locates a snippet also records the physical PDF page it was found on, via `DocText.page_at()`, and that value is written back onto the finding once verification completes. Because it's a direct lookup on text the pipeline already indexed by page, rather than a guess, there is nothing to reconcile — one page number, and it's always correct with respect to the PDF's own pagination. A snippet that cannot be located at all (`not_found`, `no_text_layer`, `pdf_missing`) has nothing to report a page for, so `page_number` is simply blank for those rows — expected, not an error.
 
-**Two files: a clean deliverable and a full audit.** The pipeline writes `coded_findings.xlsx` with only the findings that verified (every status except `not_found`) and no verification columns — the file a researcher actually works from — and `coded_findings_verified.xlsx` with every finding plus its verdict. Nothing is silently lost: a `not_found` is dropped from the clean file but preserved, with its score and matched text, in the audit file, so a reviewer can confirm whether it was a genuine fabrication or (as happened on the bundled paper before the header fix) an extraction artifact. Only `not_found` is filtered out; `near_match`, `no_text_layer`, and `pdf_missing` rows are kept in the clean file, since they are not confirmed-absent quotes.
+**Two files: a clean deliverable and a full audit.** The pipeline writes `coded_findings.xlsx` with only the findings that verified (every status except `not_found`) and no verification-verdict columns — though it still carries the `page_number` that this stage determined, since that's a property of the finding itself, not part of the verdict — and `coded_findings_verified.xlsx` with every finding plus its verdict. Nothing is silently lost: a `not_found` is dropped from the clean file but preserved, with its score and matched text, in the audit file, so a reviewer can confirm whether it was a genuine fabrication or (as happened on the bundled paper before the header fix) an extraction artifact. Only `not_found` is filtered out; `near_match`, `no_text_layer`, and `pdf_missing` rows are kept in the clean file, since they are not confirmed-absent quotes.
 
 **It always runs, and it's free.** Verification needs no API credits, so it runs automatically at the end of every full pipeline run. It is also exposed as a standalone CLI (`python verify.py`) that re-checks an existing findings file and writes `coded_findings_verified.xlsx` without modifying the input, which makes it cheap to tune the thresholds in `config.py` against your own corpus without re-coding anything. The behaviour of the normalisation pipeline and the ladder is locked down by `test_verify.py`, which exercises each known failure mode (hyphenation, ligatures, smart quotes, page-spanning quotes, elision, fabrication, and scanned PDFs).
 
@@ -350,9 +348,9 @@ This pipeline sends document content to either Azure OpenAI or Anthropic for pro
 
 Verify, for each extracted snippet, that it really exists in the source text. **Implemented** in `verify.py` and run automatically at the end of every pipeline run (see Part 4.10). Snippets that cannot be located are dropped from `coded_findings.xlsx`, and the full verdict for every finding is written to `outputs/coded_findings_verified.xlsx`.
 
-### Change 2
+### Change 2 — Done
 
-Identification of the page number should not be done by the LLM, but should be done in the verification phase (when verifying if the snippet actually exists): the page number within the actual pdf (and not the page number written in the document) should be retained then.
+Identification of the page number should not be done by the LLM, but should be done in the verification phase (when verifying if the snippet actually exists): the page number within the actual pdf (and not the page number written in the document) should be retained then. **Implemented**: `prompt.py` no longer asks the LLM for a page number at all, and `parser.py` no longer reads one from the LLM's response. Instead, `page_number` is populated entirely by `verify.py` (see Part 4.10) — whichever rung of the match ladder locates a snippet also records the physical PDF page it was found on, and that page is written into both `coded_findings.xlsx` and `coded_findings_verified.xlsx`. Snippets that could not be located (`not_found`, `no_text_layer`, `pdf_missing`) simply have no page number, which is expected.
 
 ### Change 3
 
