@@ -1,10 +1,6 @@
 {
   "file_rows": [
     {
-      "filename": "AIPPI position paper on the CPVO.CPVR Call for Evidence March 2025.pdf",
-      "file_id": "C:\\Users\\Vincent.Frippiat\\OneDrive - Ecorys\\Documents\\PnR\\Sustainable Agriculture\\PDF Processing Eleonora\\lit_review\\pdfs\\AIPPI position paper on the CPVO.CPVR Call for Evidence March 2025.pdf"
-    },
-    {
       "filename": "Adelaiye, V.O. (2024) Plant Variety Right and Intellectual Property Law in Nigeria A Review.pdf",
       "file_id": "C:\\Users\\Vincent.Frippiat\\OneDrive - Ecorys\\Documents\\PnR\\Sustainable Agriculture\\PDF Processing Eleonora\\lit_review\\pdfs\\Adelaiye, V.O. (2024) Plant Variety Right and Intellectual Property Law in Nigeria A Review.pdf"
     }
@@ -12,11 +8,11 @@
   "batches": [
     {
       "category": "CPVR_EFFECTIVENESS",
-      "batch_id": "azurebatch_d5f8be0a0cd84dd4958752af"
+      "batch_id": "azurebatch_54f21480e6724c90b524cf1c"
     },
     {
       "category": "CPVR_LEGAL",
-      "batch_id": "azurebatch_0f1f51cc60b6465b91183d48"
+      "batch_id": "azurebatch_86b315590cca49ebb451ce87"
     }
   ]
 }

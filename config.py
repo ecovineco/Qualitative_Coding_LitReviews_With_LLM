@@ -82,14 +82,14 @@ AZURE_OPENAI_API_KEY: str = os.environ.get("AZURE_OPENAI_API_KEY", "")
 """Azure OpenAI API key.  Set via environment variable for security."""
 
 AZURE_OPENAI_ENDPOINT: str = (
-    "https://foundry-be-1001215-114.cognitiveservices.azure.com/"
+    "https://Foundry-BE-1001215-114.services.ai.azure.com"
 )
 """Azure OpenAI resource endpoint, including trailing slash."""
 
 AZURE_OPENAI_API_VERSION: str = "2025-03-01-preview"
 """Azure OpenAI API version string."""
 
-AZURE_OPENAI_MODEL: str = "gpt-5.4"
+AZURE_OPENAI_MODEL: str = "gpt-5.6-luna"
 """Azure OpenAI deployment name (not the underlying model family)."""
 
 # ──────────────────────────────────────────────────────────────────────
