@@ -31,6 +31,7 @@ import abc
 import json
 import logging
 import time
+from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -65,6 +66,33 @@ def _make_custom_id(filename: str, idx: int) -> str:
     """
     safe_name = re.sub(r"[^a-zA-Z0-9_-]", "_", filename)
     return f"req-{idx:04d}-{safe_name}"[:64]
+
+
+def _retry_after_seconds(exc: Exception) -> Optional[float]:
+    """Best-effort extraction of a ``Retry-After`` value (seconds) from an error.
+
+    Azure/OpenAI include a ``Retry-After`` header on HTTP 429 responses
+    telling the caller exactly how long to wait. Used to back off
+    precisely when the pre-emptive rate limiter still gets overruled.
+
+    Args:
+        exc: The exception raised for the failed request (expected to be
+            an ``openai.RateLimitError`` or similar with a ``.response``).
+
+    Returns:
+        The header value in seconds, or ``None`` if absent/unparsable —
+        callers should fall back to a sensible default in that case.
+    """
+    response = getattr(exc, "response", None)
+    if response is None:
+        return None
+    header = getattr(response, "headers", {}).get("retry-after")
+    if not header:
+        return None
+    try:
+        return float(header)
+    except (TypeError, ValueError):
+        return None
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -606,6 +634,97 @@ class AnthropicClient(BaseLLMClient):
 # ══════════════════════════════════════════════════════════════════════
 
 
+class _AzureTokenRateLimiter:
+    """Paces requests to stay within a tokens-per-minute (TPM) quota.
+
+    Azure enforces its quota over a rolling window, so this mirrors that:
+    it remembers how many tokens each recent request *actually* used
+    (from the API's own ``usage`` field) and, before every new request,
+    checks whether sending it would push the trailing-60-second total
+    over budget. If so, it sleeps just long enough for the oldest usage
+    to age out of the window, then re-checks — i.e. it only delays when
+    a request would breach the limit, and lets requests through right
+    away whenever there's headroom.
+
+    The size of an upcoming request isn't known ahead of time (it
+    depends on the PDF being sent), so the wait check estimates it from
+    a running average of the last few *actual* request sizes. The very
+    first request of a run always fires immediately, since there's no
+    usage history yet to judge it against.
+
+    This works the same way regardless of how small or large the quota
+    is: even when a single request's real usage exceeds the entire
+    per-minute budget (common with a small quota and large PDFs), the
+    limiter simply waits out however much of the window is needed after
+    that request before allowing the next one.
+    """
+
+    def __init__(
+        self,
+        tokens_per_minute: int,
+        safety_margin: float = 1.0,
+        window_seconds: float = 60.0,
+        history_size: int = 5,
+    ) -> None:
+        """Set up the limiter.
+
+        Args:
+            tokens_per_minute: The quota to stay under (read from
+                config; never hard-coded here).
+            safety_margin: Fraction (0-1] of the quota to actually treat
+                as the budget, leaving headroom for estimation error.
+            window_seconds: Length of the rolling window, in seconds.
+            history_size: How many recent request sizes to average when
+                estimating the next one.
+        """
+        self.window_seconds = window_seconds
+        self.budget = max(int(tokens_per_minute * safety_margin), 1)
+        self._usage: deque = deque()  # (monotonic_timestamp, tokens) still inside the window
+        self._recent: deque = deque(maxlen=history_size)  # actual sizes of the last few requests
+
+    def _window_total(self, now: float) -> int:
+        """Drop expired usage entries and return the remaining total."""
+        cutoff = now - self.window_seconds
+        while self._usage and self._usage[0][0] < cutoff:
+            self._usage.popleft()
+        return sum(tokens for _, tokens in self._usage)
+
+    def throttle(self) -> None:
+        """Block, if necessary, until there's room for another request."""
+        estimated = int(sum(self._recent) / len(self._recent)) if self._recent else 0
+        # A request that actually lands never costs zero tokens, so floor
+        # the estimate at 1 — keeps the boundary check below meaningful
+        # even in edge cases where the rolling average would round to 0.
+        estimated = max(estimated, 1)
+
+        while True:
+            now = time.monotonic()
+            used = self._window_total(now)
+
+            if not self._usage or used + estimated <= self.budget:
+                return  # No usage history yet, or plenty of headroom — go now.
+
+            wait_for = max((self._usage[0][0] + self.window_seconds) - now, 1.0)
+            logger.info(
+                "Azure TPM pacing: ~%d/%d tokens used in the trailing %ds "
+                "(next request estimated at %d tokens) — waiting %.1fs "
+                "for the quota to free up...",
+                used,
+                self.budget,
+                int(self.window_seconds),
+                estimated,
+                wait_for,
+            )
+            time.sleep(wait_for)
+
+    def record_usage(self, tokens: int) -> None:
+        """Log the tokens an actually-completed request used."""
+        if tokens <= 0:
+            return
+        self._usage.append((time.monotonic(), tokens))
+        self._recent.append(tokens)
+
+
 class AzureOpenAIClient(BaseLLMClient):
     """Concrete LLM client for Azure OpenAI (GPT family).
 
@@ -627,11 +746,19 @@ class AzureOpenAIClient(BaseLLMClient):
     exists on disk and returns its absolute path, which is then used as
     the ``file_id`` for that document.
 
+    Requests are paced by an internal sliding-window rate limiter
+    (``_AzureTokenRateLimiter``) so that total token usage stays within
+    ``config.AZURE_OPENAI_TPM_LIMIT`` tokens per rolling 60-second
+    window, waiting only when a request would otherwise exceed it. If
+    Azure still returns a 429, the call is retried with backoff up to
+    ``config.AZURE_RATE_LIMIT_MAX_RETRIES`` times.
+
     Attributes:
         api_key: The Azure OpenAI API key.
         endpoint: The Azure OpenAI resource endpoint.
         api_version: API version string.
         model: Deployment name to use for analysis.
+        rate_limiter: Paces requests to the configured TPM quota.
     """
 
     def __init__(
@@ -674,6 +801,10 @@ class AzureOpenAIClient(BaseLLMClient):
             azure_endpoint=endpoint,
             api_version=api_version,
         )
+        self.rate_limiter = _AzureTokenRateLimiter(
+            tokens_per_minute=config.AZURE_OPENAI_TPM_LIMIT,
+            safety_margin=config.AZURE_RATE_LIMIT_SAFETY_MARGIN,
+        )
 
     # ── Internal helpers ────────────────────────────────────────────
 
@@ -696,6 +827,86 @@ class AzureOpenAIClient(BaseLLMClient):
             raw = f.read()
         b64 = base64.b64encode(raw).decode("ascii")
         return f"data:application/pdf;base64,{b64}"
+
+    def _call_with_rate_limit(
+        self,
+        prompt: str,
+        pdf_data_uri: str,
+        filename: str,
+    ) -> Any:
+        """Call the Responses API while respecting the TPM quota.
+
+        Before every attempt, blocks on ``self.rate_limiter`` until the
+        trailing 60-second token usage has room for another request.
+        After a successful call, records the *actual* tokens the API
+        reports so later waits are based on real usage rather than a
+        guess.
+
+        If Azure still returns a 429 despite the pre-emptive wait (e.g.
+        the estimate for this particular request was too low), backs
+        off using the ``Retry-After`` header when present and retries,
+        up to ``config.AZURE_RATE_LIMIT_MAX_RETRIES`` attempts.
+
+        Args:
+            prompt: The analysis prompt text.
+            pdf_data_uri: The base64 ``data:application/pdf`` URI.
+            filename: Original filename, passed through to the
+                ``input_file`` block and used in retry log messages.
+
+        Returns:
+            The raw Responses API result object.
+
+        Raises:
+            RuntimeError: If every retry attempt is exhausted.
+        """
+        from openai import RateLimitError
+
+        last_error: Optional[Exception] = None
+
+        for attempt in range(1, config.AZURE_RATE_LIMIT_MAX_RETRIES + 1):
+            self.rate_limiter.throttle()
+            try:
+                response = self._client.responses.create(
+                    model=self.model,
+                    input=[
+                        {
+                            "role": "user",
+                            "content": [
+                                {
+                                    "type": "input_text",
+                                    "text": prompt,
+                                },
+                                {
+                                    "type": "input_file",
+                                    "file_data": pdf_data_uri,
+                                    "filename": filename,
+                                },
+                            ],
+                        }
+                    ],
+                )
+                usage = getattr(response, "usage", None)
+                self.rate_limiter.record_usage(getattr(usage, "total_tokens", 0) or 0)
+                return response
+
+            except RateLimitError as exc:
+                last_error = exc
+                wait_s = _retry_after_seconds(exc) or self.rate_limiter.window_seconds
+                logger.warning(
+                    "  Azure TPM limit hit on '%s' (attempt %d/%d) — "
+                    "waiting %.1fs before retrying...",
+                    filename,
+                    attempt,
+                    config.AZURE_RATE_LIMIT_MAX_RETRIES,
+                    wait_s,
+                )
+                time.sleep(wait_s)
+
+        raise RuntimeError(
+            f"Azure rate limit still exceeded after "
+            f"{config.AZURE_RATE_LIMIT_MAX_RETRIES} attempts for "
+            f"'{filename}'. Last error: {last_error}"
+        )
 
     # ── Public interface (BaseLLMClient) ────────────────────────────
 
@@ -734,6 +945,12 @@ class AzureOpenAIClient(BaseLLMClient):
         so that ``check_batch()`` and ``get_results()`` can read them back
         on a subsequent ``--resume``.
 
+        Each call is paced by ``self.rate_limiter`` (see
+        ``_AzureTokenRateLimiter``) so the trailing-60-second token usage
+        stays within ``config.AZURE_OPENAI_TPM_LIMIT`` — requests fire
+        immediately while there's headroom and only wait when they'd
+        otherwise breach the quota.
+
         Args:
             file_rows: List of ``(filename, file_id)`` tuples, where each
                 ``file_id`` is the absolute path returned by
@@ -764,24 +981,10 @@ class AzureOpenAIClient(BaseLLMClient):
 
                 try:
                     pdf_data_uri = self._encode_pdf(Path(file_id))
-                    response = self._client.responses.create(
-                        model=self.model,
-                        input=[
-                            {
-                                "role": "user",
-                                "content": [
-                                    {
-                                        "type": "input_text",
-                                        "text": prompt,
-                                    },
-                                    {
-                                        "type": "input_file",
-                                        "file_data": pdf_data_uri,
-                                        "filename": filename,
-                                    },
-                                ],
-                            }
-                        ],
+                    response = self._call_with_rate_limit(
+                        prompt=prompt,
+                        pdf_data_uri=pdf_data_uri,
+                        filename=filename,
                     )
                     text = response.output_text or ""
                     record["result"] = {

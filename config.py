@@ -93,6 +93,38 @@ AZURE_OPENAI_MODEL: str = "gpt-5.6-luna"
 """Azure OpenAI deployment name (not the underlying model family)."""
 
 # ──────────────────────────────────────────────────────────────────────
+# Azure OpenAI rate limiting
+# ──────────────────────────────────────────────────────────────────────
+
+AZURE_OPENAI_TPM_LIMIT: int = 667000
+"""Tokens-per-minute (TPM) quota for the Azure OpenAI deployment above.
+
+``AzureOpenAIClient`` paces its requests (see the rate limiter in
+``api.py``) so that total token usage in any trailing 60-second window
+stays at or under this number, instead of firing requests back-to-back
+and risking a 429. Check the current value for your deployment in
+Azure AI Foundry -> Management -> Quota, and update this constant if it
+changes — nothing else in the code needs to change.
+"""
+
+AZURE_RATE_LIMIT_SAFETY_MARGIN: float = 0.9
+"""Fraction (0-1] of ``AZURE_OPENAI_TPM_LIMIT`` the limiter actually targets.
+
+E.g. 0.9 means it treats 90% of the real quota as its working budget.
+This leaves headroom for the fact that the size of the *next* request is
+only ever estimated from recent requests, not known exactly in advance.
+"""
+
+AZURE_RATE_LIMIT_MAX_RETRIES: int = 5
+"""Max attempts for a single request if Azure still returns a 429.
+
+This is a safety net for when the pre-emptive wait above wasn't enough
+(e.g. the very first request of a run, before there is any usage history
+to estimate from). Each retry backs off using the response's
+``Retry-After`` header when present, or the window length otherwise.
+"""
+
+# ──────────────────────────────────────────────────────────────────────
 # Backwards-compatible alias
 # ──────────────────────────────────────────────────────────────────────
 
@@ -172,14 +204,14 @@ with its verification status, score, method, and the page it was found
 on.
 """
 
-VERIFY_FUZZY_THRESHOLD: int = 95
+VERIFY_FUZZY_THRESHOLD: int = 97
 """Fuzzy score (0-100) at or above which a snippet counts as verified.
 
 Matches in ``[VERIFY_NEAR_THRESHOLD, VERIFY_FUZZY_THRESHOLD)`` are
 flagged as ``near_match`` for human review rather than auto-verified.
 """
 
-VERIFY_NEAR_THRESHOLD: int = 85
+VERIFY_NEAR_THRESHOLD: int = 93
 """Fuzzy score below which a snippet is treated as ``not_found``."""
 
 VERIFY_MIN_LEN_FOR_FUZZY: int = 40
